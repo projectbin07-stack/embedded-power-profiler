@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+      - name: Lint
+        run: ruff check .
+      - name: Format
+        run: ruff format --check .
+      - name: Type check
+        run: mypy
+      - name: Test
+        run: pytest --cov --cov-report=term-missing --cov-fail-under=85
+      - name: CLI smoke test
+        shell: bash
+        run: |
+          epp --version
+          epp synth --profile esp32-wifi -o esp32.csv --duration 600 --states-out states.toml
+          epp analyze esp32.csv --states states.toml --report report.html --capacity-mah 2500
+          epp analyze tests/fixtures/esp32.sslog --json > analysis.json
+          epp export tests/fixtures/esp32_logger.csv --solar-node-sizer sns.json --full-config
+          set +e
+          epp analyze esp32.csv --strict > /dev/null
+          test $? -eq 1
+          epp analyze does-not-exist.csv
+          test $? -eq 2
+      - name: Pure-Python path (numpy removed)
+        run: |
+          python -m pip uninstall -y numpy
+          pytest -q tests/test_spectral.py tests/test_analysis.py
+
+  interop:
+    # Runs the other projects' own code, pinned to released tags, against this one.
+    name: Interop (solar-node-sizer, serial-scope, ina219-battery-monitor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: projectbin07-stack/solar-node-sizer
+          ref: v0.1.1
+          path: ext/solar-node-sizer
+      - uses: actions/checkout@v7
+        with:
+          repository: projectbin07-stack/ina219-battery-monitor
+          ref: v0.1.0
+          path: ext/ina219-battery-monitor
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install
+        run: |
+          python -m pip install -e ".[dev]"
+          python -m pip install "serial-scope @ git+https://github.com/projectbin07-stack/serial-scope@v0.1.0"
+      - name: Interop tests (serial-scope and the ina219 logger, imported)
+        env:
+          EPP_INA219_LOGGER: ext/ina219-battery-monitor/tools/logger.py
+        run: pytest -v tests/test_interop.py
+      - name: solar-node-sizer v0.1.1 accepts the export and reproduces the budget
+        run: |
+          epp synth --profile esp32-wifi -o esp32.csv --states-out states.toml
+          epp analyze esp32.csv --states states.toml --capacity-mah 2500 --json > analysis.json
+          epp export esp32.csv --states states.toml --capacity-mah 2500 --solar-node-sizer profile.json
+          epp export esp32.csv --states states.toml --capacity-mah 2500 --solar-node-sizer full.json --full-config
+          node scripts/check_solar_node_sizer.mjs ext/solar-node-sizer profile.json analysis.json
+          node scripts/check_solar_node_sizer.mjs ext/solar-node-sizer full.json analysis.json
+          node ext/solar-node-sizer/bin/solar-node-sizer.js simulate profile.json
+          node ext/solar-node-sizer/bin/solar-node-sizer.js simulate full.json --json > sim.json
+          node -e "const j = require('./sim.json'); if (!(j.autonomyDays > 14 && j.autonomyDays < 15)) process.exit(1)"
+      - name: Logs recorded with the ina219 logger and serial-scope load
+        run: |
+          epp synth -o raw.log --format ina219 --duration 300
+          python ext/ina219-battery-monitor/tools/logger.py replay raw.log --out logger.csv
+          epp analyze logger.csv
+          epp synth -o run.sslog --format sslog --duration 300
+          serial-scope stats run.sslog
+          serial-scope replay run.sslog --show none --speed 0 --csv scope.csv
+          epp analyze scope.csv
+          serial-scope demo demo.sslog --kind ina219
+          epp analyze demo.sslog
