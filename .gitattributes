@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sslog binary
+*.png binary
+# Raw serial logs keep the firmware's CR LF line endings.
+tests/fixtures/*.log -text
