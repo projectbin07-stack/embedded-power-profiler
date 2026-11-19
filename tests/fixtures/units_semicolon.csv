@@ -1,0 +1,8 @@
+# exported by a bench supply
+Time [ms];Current (uA);Voltage [mV]
+0;20;3300
+100;20;3300
+200;40000;3290
+300;40000;3290
+n/a;n/a;n/a
+400;20;3300
