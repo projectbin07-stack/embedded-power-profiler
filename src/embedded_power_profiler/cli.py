@@ -94,7 +94,8 @@ def _input_args(p: argparse.ArgumentParser) -> None:
         "--resample-ms",
         type=_positive,
         metavar="MS",
-        help="analysis grid (default: median interval)",
+        help="analysis grid (default: the median interval; generic CSVs sampled faster than "
+        "1 kHz are block-averaged to 1 ms while reading, and to MS when it is given)",
     )
     a.add_argument(
         "--penalty",
@@ -216,6 +217,7 @@ def _run_analysis(args: argparse.Namespace) -> Result:
         time_unit=args.time_unit,
         current_unit=unit[args.current_unit] if args.current_unit else None,
         voltage_unit=unit[args.voltage_unit] if args.voltage_unit else None,
+        block_s=args.resample_ms / 1000 if args.resample_ms else None,
     )
     trace = load(args.log, args.format, csv_opts)
     return analyze(trace, _options(args))

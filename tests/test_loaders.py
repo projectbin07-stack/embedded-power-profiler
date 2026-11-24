@@ -62,7 +62,7 @@ def _frames_log(path: Path, frames: list[Frame], extra: list[str] | None = None)
 def test_ina219_restart_wrap_and_flags(tmp_path: Path) -> None:
     f = [
         Frame(0, 1000, 3300, 1000, 3300, 0, 0, 1000, 0),
-        Frame(1, 1500, 3300, 1000, 3300, 1, 1, 1000, 2),  # not-ready: kept
+        Frame(1, 1500, 3300, 1000, 3300, 1, 1, 1000, 2),  # not-ready: dropped (audit #48)
         Frame(2, 2000, 3300, 0, 0, 0, 0, 1000, 4),  # sensor error: dropped
         Frame(3, 4294967000, 3300, 2000, 6600, 2, 2, 1000, 0),
         Frame(4, 200, 3300, 2000, 6600, 3, 3, 1000, 0),  # clock wrapped: seq continues
@@ -72,15 +72,15 @@ def test_ina219_restart_wrap_and_flags(tmp_path: Path) -> None:
     path = tmp_path / "r.log"
     _frames_log(path, f, ["$BM1,garbage*00"])
     tr = load(path)
-    assert tr.current_ma == [1.0, 1.0, 2.0, 2.0, 3.0]
-    # Times: 1.0, 1.5, 4294967.0, (2^32 + 200) ms, then the restart run 60 s after the last one.
+    assert tr.current_ma == [1.0, 2.0, 2.0, 3.0]
+    # Times: 1.0, 4294967.0, (2^32 + 200) ms, then the restart run 60 s after the last one.
     wrapped = (2**32 + 200) / 1000.0
-    assert tr.t[:4] == pytest.approx([1.0, 1.5, 4294967.0, wrapped])
-    assert tr.t[4] == pytest.approx(wrapped + 60.0)
+    assert tr.t[:3] == pytest.approx([1.0, 4294967.0, wrapped])
+    assert tr.t[3] == pytest.approx(wrapped + 60.0)
     notes = " | ".join(tr.notes)
     assert "1 lines failed" in notes
     assert "flagged overflow/sensor-error" in notes
-    assert "not-ready" in notes
+    assert "1 frames flagged not-ready (no new conversion) were dropped" in notes
     assert "wrapped 1 time" in notes
     assert "restarted 1 time(s); 1 without host time" in notes
     # Counter: run 1 goes 0 -> 3 uAh, run 2 contributes 0 (one sample).
@@ -168,10 +168,113 @@ def test_generic_csv_assumed_units_and_iso_time(tmp_path: Path) -> None:
         "2026-11-19T10:00:01Z,7,3.3\n",
         encoding="utf-8",
     )
-    tr = load(path)
+    # No current unit: refused (audit #40), not assumed to be mA.
+    with pytest.raises(TraceError, match=r"'current' has no unit \(first values 5 to 7\)"):
+        load(path)
+    tr = load(path, csv_options=CsvOptions(current_unit="ma"))
     assert [t - tr.t[0] for t in tr.t] == pytest.approx([0.0, 0.5, 1.0])
+    assert tr.current_ma == pytest.approx([5.0, 6.0, 7.0])
     notes = " ".join(tr.notes)
-    assert "assumed mA" in notes and "assumed V" in notes and "ISO 8601" in notes
+    assert "assumed V" in notes and "ISO 8601" in notes
+
+
+def test_generic_csv_in_amps_without_units_is_refused(tmp_path: Path) -> None:
+    """Audit #40: a log in amps with a bare 'current' header was read 1000x low, exit 0."""
+    path = tmp_path / "si.csv"
+    rows = [f"{k * 0.02:.2f},{0.00002 if k % 50 else 0.19},3.3" for k in range(200)]
+    path.write_text("time,current,voltage\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    with pytest.raises(TraceError, match="--current-unit A, mA, uA or nA"):
+        load(path)
+    tr = load(path, csv_options=CsvOptions(current_unit="a"))
+    assert max(tr.current_ma) == pytest.approx(190.0)
+    assert min(tr.current_ma) == pytest.approx(0.02)
+
+
+def test_generic_csv_columns_named_by_unit(tmp_path: Path) -> None:
+    path = tmp_path / "bare.csv"
+    path.write_text("t_s,mA,mV\n0,0.02,3300\n0.5,40,3290\n1.0,0.02,3300\n", encoding="utf-8")
+    tr = load(path)
+    assert tr.current_ma == pytest.approx([0.02, 40.0, 0.02])
+    assert tr.voltage_v == pytest.approx([3.3, 3.29, 3.3])
+    path.write_text("time_ms,uA\n0,20\n10,30\n", encoding="utf-8")
+    tr = load(path)
+    assert tr.t == pytest.approx([0.0, 0.01])
+    assert tr.current_ma == pytest.approx([0.02, 0.03])
+
+
+def test_generic_csv_millivolts_without_unit_are_refused(tmp_path: Path) -> None:
+    path = tmp_path / "mv.csv"
+    path.write_text("time_s,current_ma,voltage\n0,1,3300\n1,2,3301\n2,1,3299\n", encoding="utf-8")
+    with pytest.raises(TraceError, match="--voltage-unit mV"):
+        load(path)
+    tr = load(path, csv_options=CsvOptions(voltage_unit="mv"))
+    assert tr.voltage_v == pytest.approx([3.3, 3.301, 3.299])
+
+
+def _ppk_like(path: Path, n: int, rate_hz: float) -> tuple[float, float]:
+    """A PPK2-style export: 25 uA sleep, 80 mA bursts of 300 ms every 1 s. Returns
+    (exact mean current in mA over the rows, span in s)."""
+    period = int(rate_hz)
+    burst = int(0.3 * rate_hz)
+    lines = ["Timestamp(ms),Current(uA),D0-D7"]
+    total = 0.0
+    for k in range(n):
+        ua = 80000.0 if (k % period) >= period - burst else 25.0 + (k % 7) - 3
+        total += ua
+        lines.append(f"{k * 1000.0 / rate_hz:.3f},{ua:.3f},")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return total / n / 1000.0, (n - 1) / rate_hz
+
+
+def test_high_rate_csv_is_block_averaged_and_keeps_the_charge(tmp_path: Path) -> None:
+    """Audit #36: a 100 kHz capture is averaged to 1 ms bins while it is read."""
+    path = tmp_path / "ppk.csv"
+    mean_ma, span = _ppk_like(path, 300_000, 100_000.0)
+    tr = load(path)
+    assert len(tr) == pytest.approx(span / 1e-3, abs=2)  # one point per millisecond
+    assert sum(tr.current_ma) / len(tr) == pytest.approx(mean_ma, rel=1e-9)
+    assert tr.t[1] - tr.t[0] == pytest.approx(1e-3)
+    assert any("block-averaged to 1 ms" in n for n in tr.notes)
+    # block_s = 0 keeps every row (the old behaviour)
+    raw = load(path, csv_options=CsvOptions(block_s=0))
+    assert len(raw) == 300_000
+    assert sum(raw.current_ma) / len(raw) == pytest.approx(mean_ma, rel=1e-9)
+    # an explicit, coarser period
+    coarse = load(path, csv_options=CsvOptions(block_s=0.01))
+    assert len(coarse) == pytest.approx(span / 0.01, abs=2)
+
+
+def test_block_averaging_handles_gaps_out_of_order_rows_and_voltage(tmp_path: Path) -> None:
+    path = tmp_path / "gappy.csv"
+    rows = [(k * 1e-4, 10.0, 3.3) for k in range(5000)]  # 0.5 s at 10 kHz
+    rows += [(1.0 + k * 1e-4, 20.0, 3.2) for k in range(5000)]  # after a 0.5 s gap
+    rows.insert(10, (-0.0021, 30.0, 3.1))  # before the first row: its own early bin
+    text = "time_s,current_ma,voltage_v\n" + "".join(f"{t:.5f},{i},{v}\n" for t, i, v in rows)
+    path.write_text(text, encoding="utf-8")
+    tr = load(path)
+    assert len(tr) == 1001
+    assert tr.current_ma[0] == pytest.approx(30.0)
+    assert tr.t[0] == pytest.approx(-0.0021)
+    assert tr.voltage_v is not None and tr.voltage_v[1] == pytest.approx(3.3)
+    assert max(b - a for a, b in zip(tr.t, tr.t[1:], strict=False)) == pytest.approx(0.5, abs=2e-3)
+    assert tr.current_ma[-1] == pytest.approx(20.0)
+
+
+def test_bin_merge_caps_the_number_of_points(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import embedded_power_profiler.loaders as loaders
+
+    monkeypatch.setattr(loaders, "MAX_BINS", 100)
+    path = tmp_path / "long.csv"
+    path.write_text(
+        "time_s,current_ma\n" + "".join(f"{k * 1e-4:.4f},{k % 3}\n" for k in range(5000)),
+        encoding="utf-8",
+    )
+    tr = load(path)
+    assert len(tr) <= 100
+    assert sum(tr.current_ma) / len(tr) == pytest.approx(1.0, rel=1e-2)
+    assert any("block-averaged to 8 ms" in n for n in tr.notes)
 
 
 def test_errors(tmp_path: Path) -> None:
