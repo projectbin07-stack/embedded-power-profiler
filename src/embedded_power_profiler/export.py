@@ -1,6 +1,6 @@
 """Exports: solar-node-sizer load profile / config, and a CSV of detected events.
 
-solar-node-sizer (v0.1.1, ``src/core/config.js`` and ``src/core/load.js``) describes the load as
+solar-node-sizer (v0.1.2, ``src/core/config.js`` and ``src/core/load.js``) describes the load as
 a list of states. One state has ``"base": true`` and fills whatever time the others leave; the
 others are scheduled with ``every`` (seconds between events) and ``duration`` (seconds per
 event); ``mA`` is the current at the supply. The exporter chooses
@@ -31,9 +31,9 @@ from typing import Any
 from . import __version__
 from .analysis import Result
 
-SNS_VERSION = "0.1.1"
+SNS_VERSION = "0.1.2"
 
-# solar-node-sizer v0.1.1 defaultConfig() (src/core/config.js), less the load, which is ours.
+# solar-node-sizer v0.1.2 defaultConfig() (unchanged since v0.1.1) (src/core/config.js), less the load, which is ours.
 SNS_DEFAULTS: dict[str, Any] = {
     "location": {
         "lat": 12.97,
@@ -132,13 +132,19 @@ def _note(result: Result, measured_at: str) -> str:
         if result.mean_voltage_v is not None
         else "not recorded"
     )
-    return (
+    note = (
         f"Load profile measured by embedded-power-profiler {__version__} from "
         f"{result.trace.name} ({result.trace.source}, {result.covered_s:.0f} s analysed, "
         f"{result.mah_per_day:.4g} mAh/day). Current measured at the {measured_at}; "
         f"mean voltage {v}. 'every' and 'duration' are means, so long outlier events are "
         "included."
     )
+    if result.warnings:
+        codes = ", ".join(sorted({w.code for w in result.warnings}))
+        note += f" The analysis gave {len(result.warnings)} warning(s) ({codes}): " + " | ".join(
+            f"[{w.code}] {w.message}" for w in result.warnings
+        )
+    return note
 
 
 def solar_node_sizer_profile(
@@ -182,7 +188,7 @@ def solar_node_sizer_config(
 
 
 def validate_sns_config(cfg: Any) -> None:
-    """Re-implementation of the structural checks solar-node-sizer v0.1.1 applies on import.
+    """Re-implementation of the structural checks solar-node-sizer v0.1.2 applies on import.
 
     Mirrors ``normalizeConfig`` (unknown top-level fields are rejected) and ``normalizeLoad``
     (non-empty array; name string; ``mA >= 0``; optional ``every``/``duration``/``from``/``to``

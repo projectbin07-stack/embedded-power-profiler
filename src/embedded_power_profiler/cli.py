@@ -167,8 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument(
         "--measured-at",
         choices=["supply", "battery"],
-        default="supply",
-        help="where the current was measured (default: supply, after the regulator)",
+        default=None,
+        help="where the current was measured (default: battery for ina219-battery-monitor "
+        "logs, whose sensor sits on the battery; supply, after the regulator, for other CSVs)",
     )
     ex.add_argument("--name", help="configuration name")
 
@@ -293,12 +294,29 @@ def cmd_analyze(args: argparse.Namespace, out: TextIO) -> int:
     return EXIT_WARN if args.strict and r.warnings else EXIT_OK
 
 
+BATTERY_SIDE_SOURCES = ("ina219", "logger-csv", "sslog", "sslog-csv")
+
+
 def cmd_export(args: argparse.Namespace, out: TextIO) -> int:
     r = _run_analysis(args)
+    measured_at = args.measured_at
+    if measured_at is None:
+        measured_at = "battery" if r.trace.source in BATTERY_SIDE_SOURCES else "supply"
+        why = (
+            "ina219-battery-monitor senses on the battery side"
+            if measured_at == "battery"
+            else "generic CSV"
+        )
+        out.write(f"current taken as measured at the {measured_at} ({why}; --measured-at)\n")
+    if args.strict and r.warnings:
+        for warn in r.warnings:
+            out.write(f"  [{warn.code}] {warn.message}\n")
+        out.write(f"not written: {len(r.warnings)} warning(s) and --strict\n")
+        return EXIT_WARN
     if args.full_config:
-        cfg = solar_node_sizer_config(r, args.name, args.measured_at)
+        cfg = solar_node_sizer_config(r, args.name, measured_at)
     else:
-        cfg = solar_node_sizer_profile(r, args.name, args.measured_at)
+        cfg = solar_node_sizer_profile(r, args.name, measured_at)
     Path(args.solar_node_sizer).write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
     if args.events_csv:
         write_events_csv(r, args.events_csv)
@@ -316,7 +334,9 @@ def cmd_export(args: argparse.Namespace, out: TextIO) -> int:
             )
     for warn in r.warnings:
         out.write(f"  [{warn.code}] {warn.message}\n")
-    return EXIT_WARN if args.strict and r.warnings else EXIT_OK
+    if r.warnings:
+        out.write("  (the warnings are also in the exported note)\n")
+    return EXIT_OK
 
 
 def cmd_synth(args: argparse.Namespace, out: TextIO) -> int:

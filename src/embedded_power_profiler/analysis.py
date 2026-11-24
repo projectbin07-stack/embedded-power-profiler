@@ -507,6 +507,10 @@ def _cycle(
     )
 
 
+# Below this much covered log time the daily extrapolation gets its own warning.
+MIN_DAILY_BASIS_S = 60.0
+
+
 def _warnings(r: Result) -> list[Warning_]:
     out: list[Warning_] = []
     dt = r.native_dt
@@ -596,6 +600,15 @@ def _warnings(r: Result) -> list[Warning_]:
                     f"({50 * r.lsb_ma / max(base.level_ma, 1e-12):.2g} % of the level)",
                 )
             )
+    if r.covered_s < MIN_DAILY_BASIS_S:
+        out.append(
+            Warning_(
+                "short-log",
+                f"daily figures are extrapolated x{SECONDS_PER_DAY / r.covered_s:.3g} from "
+                f"only {r.covered_s:.3g} s of log; record at least {MIN_DAILY_BASIS_S:g} s "
+                "and several wake cycles before relying on mAh/day or battery life",
+            )
+        )
     if r.cycle.wakes < 3:
         out.append(
             Warning_(
