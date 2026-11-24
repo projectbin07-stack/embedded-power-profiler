@@ -1,6 +1,6 @@
 """Cross-checks against the other projects' own code, when it is available.
 
-* serial-scope: ``pip install "git+https://github.com/projectbin07-stack/serial-scope@v0.1.0"``
+* serial-scope: ``pip install "git+https://github.com/projectbin07-stack/serial-scope@v0.3.0"``
   (CI does this) or put its ``src`` on ``PYTHONPATH``.
 * ina219-battery-monitor: set ``EPP_INA219_LOGGER`` to the path of its ``tools/logger.py``.
 

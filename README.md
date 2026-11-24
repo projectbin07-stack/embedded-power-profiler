@@ -13,7 +13,8 @@ operating states (deep sleep, boot, sensor read, radio...) with change-point det
 clustering, and reports per state: current, duration, repetition period, charge per event and per
 day, and share of the total. It finds the wake period, flags outlier events such as a Wi-Fi
 reconnect that took four times longer, estimates battery life, writes a self-contained HTML
-report, and exports a load profile that solar-node-sizer loads unchanged.
+report, and exports a load profile that solar-node-sizer (v0.1.2 or newer for its browser
+app; any version for its CLI) loads unchanged.
 
 > **Validation status.** Everything in this README, the tests and the screenshots comes from
 > **synthetic traces** produced by the tool's own generator (and from the other projects'
@@ -46,9 +47,9 @@ flowchart LR
 
 | Project | What `epp` uses | Checked how |
 | --- | --- | --- |
-| ina219-battery-monitor v0.1.0 | raw serial log (`$BM1,...*HH` lines, CRC-8) and the `tools/logger.py` CSV | independent decoder; CI runs that project's own `logger.py` on `epp`'s frames and `epp` on the CSV it writes |
-| serial-scope v0.1.0 | `.sslog` raw logs (the `$BM1` frames inside are decoded) and its decoded CSV export | independent reader; CI installs serial-scope at the tag, reads `epp`'s `.sslog` with it, and analyses serial-scope's own demo log and CSV export |
-| solar-node-sizer v0.1.1 | output: `load` states and a full config | CI checks out the tag and runs its `normalizeConfig`, `dailyBudget`, `autonomyHours` and CLI on the export (see [compatibility](#solar-node-sizer-compatibility)) |
+| ina219-battery-monitor v0.2.0 | raw serial log (`$BM1,...*HH` lines, CRC-8) and the `tools/logger.py` CSV | independent decoder; CI runs that project's own `logger.py` on `epp`'s frames and `epp` on the CSV it writes |
+| serial-scope v0.3.0 | `.sslog` raw logs (the `$BM1` frames inside are decoded) and its decoded CSV export | independent reader; CI installs serial-scope at the tag, reads `epp`'s `.sslog` with it, and analyses serial-scope's own demo log and CSV export |
+| solar-node-sizer v0.1.2 | output: `load` states and a full config | CI checks out the tag and runs its `normalizeConfig`, `dailyBudget`, `autonomyHours`, CLI and the browser app's JSON import (`importConfigText`) on the export (see [compatibility](#solar-node-sizer-compatibility)) |
 
 ## Features
 
@@ -87,7 +88,7 @@ for the FFT when it is installed.
 Not published to PyPI. Python 3.10 or newer:
 
 ```console
-pip install "git+https://github.com/projectbin07-stack/embedded-power-profiler.git@v0.1.0"
+pip install "git+https://github.com/projectbin07-stack/embedded-power-profiler.git@v0.2.0"
 pip install numpy   # optional: faster autocorrelation
 ```
 
@@ -159,6 +160,7 @@ max_ma = 27.5
 ...
 
 $ epp export esp32.csv --states states.toml --solar-node-sizer esp32-load.json
+current taken as measured at the supply (generic CSV; --measured-at)
 wrote esp32-load.json: 5 load states, 138.4 mAh/day measured
   deep sleep              0.0250371 mA  base
   sensor read                18.068 mA  every 60 s for 0.494667 s
@@ -166,13 +168,16 @@ wrote esp32-load.json: 5 load states, 138.4 mAh/day measured
   Wi-Fi connect             94.9105 mA  every 60 s for 2.79867 s
   MQTT publish               185.51 mA  every 60 s for 0.309333 s
   [quantisation] the base state 'deep sleep' draws 25 uA, only 2.5 ADC steps of 10 uA; ...
+  (the warnings are also in the exported note)
 ```
 
 `esp32-load.json` is a partial solar-node-sizer config (`name`, `note`, `load`; solar-node-sizer
 fills in its defaults for everything else). `--full-config` writes every section with
 solar-node-sizer's defaults plus the measured load, `--capacity-mah`, `--dod` and
 `--self-discharge`. In a solar-node-sizer checkout: `node bin/solar-node-sizer.js simulate
-esp32-load.json`.
+esp32-load.json`, or in its browser app (v0.1.2 or newer) pick the file under "Start from" or
+drop it on the page. Analysis warnings are appended to the config's `note`, and with `--strict`
+an export that has warnings is not written.
 
 ### What a too-slow log looks like
 
@@ -229,11 +234,24 @@ For ina219-battery-monitor (or any INA219-based logger):
 - Log at least three wake cycles (the tool warns below three), and enough cycles to catch the
   rare events you care about: a 10 % reconnect rate needs dozens of cycles to show reliably.
 - Record the voltage on the same side as the current, and tell the export which side it is
-  (`--measured-at supply|battery`).
+  (`--measured-at supply|battery`). Without the option the export assumes the battery side for
+  ina219-battery-monitor logs (its board senses high-side on the battery) and the supply side
+  for generic CSVs, and prints which it used.
+- Name the units in a generic CSV header (`current_ma`, `Current(uA)`, `I [A]`, or a column
+  called just `mA`), or pass `--current-unit`. A current column without a unit is refused
+  (exit 2): guessing mA read a log in amps 1000 times low.
 
 ## Methods
 
 Notation: `i_k` current samples on a uniform grid of period `T` (mA), `v_k` volts, `n` samples.
+
+**High-rate input.** A generic CSV sampled faster than 1 kHz (a PPK2 or Joulescope export,
+for example) is read as a stream and block-averaged to 1 ms bins (or to `--resample-ms`) while it
+is read: each bin's current is the mean of its samples and its time their mean time, so the
+charge is preserved exactly, memory is proportional to the log's length in milliseconds, not to
+its rows, and the change-point search runs on 1000 points a second. Bursts shorter than about two
+bins are not resolved as states of their own (their charge still counts). Beyond 2 million bins
+adjacent bins are merged. `--resample-ms` below the input's interval keeps every sample.
 
 **Resampling.** Linear interpolation onto `t_0 + kT` (`T` = median input interval unless
 `--resample-ms`). Consecutive input samples more than 3 `T` apart bound a gap; grid points inside
@@ -288,7 +306,7 @@ not chosen over `T`), refined with a parabola through three points.
 **Energy.** `E = sum_k i_k v_k T` (or `Q * --voltage`); daily figures scale by
 `86400 / t_covered`.
 
-**Battery life** (solar-node-sizer v0.1.1 convention, its `docs/models.md` section 10).
+**Battery life** (solar-node-sizer v0.1.2 convention, its `docs/models.md` section 10).
 Self-discharge is proportional to the stored charge: per hour `s = 1 - (1 - m)^(1/730)` for `m`
 per month, applied before the hourly load `p = (mAh/day) / 24`. From full, `E0 = capacity`:
 
@@ -323,10 +341,10 @@ regulator when the measured supply is 3.3 V, a custom LDO at the measured voltag
 
 Verified two ways:
 
-1. `export.validate_sns_config` re-implements solar-node-sizer v0.1.1's structural checks
+1. `export.validate_sns_config` re-implements solar-node-sizer v0.1.2's structural checks
    (`normalizeConfig`, `normalizeLoad`). Every export passes through it, and the unit tests run
    it on solar-node-sizer's bundled example and on invalid configs.
-2. CI checks out solar-node-sizer at tag `v0.1.1` and runs
+2. CI checks out solar-node-sizer at tag `v0.1.2` and runs
    [`scripts/check_solar_node_sizer.mjs`](scripts/check_solar_node_sizer.mjs), which imports its
    `normalizeConfig`, `dailyBudget`, `autonomyHours` and `selfDischargePerHour`, plus its CLI
    (`simulate`). Local run on the trace above (`analysis.json` from
@@ -374,11 +392,12 @@ options:
 | `--time-col`, `--current-col`, `--voltage-col`, `--time-unit`, `--current-unit`, `--voltage-unit` | generic CSV columns and units when the header does not say |
 | `--states FILE` | TOML/JSON states file (bands to names, optional `[analysis]` settings) |
 | `--voltage V` | supply voltage for mWh when the log has none |
-| `--resample-ms`, `--penalty` (2), `--min-samples` (2), `--max-states` (8) | analysis settings |
+| `--resample-ms` | analysis grid; generic CSVs faster than 1 kHz are block-averaged to 1 ms, or to this |
+| `--penalty` (2), `--min-samples` (2), `--max-states` (8) | analysis settings |
 | `--min-burst-ms MS` | warn if the sample rate cannot resolve bursts this short |
 | `--capacity-mah`, `--dod` (0.8), `--self-discharge` (0.03 per month) | battery life |
 | `--report FILE.html`, `--json`, `--events-csv FILE` | outputs |
-| `--strict` | exit 1 if there are warnings |
+| `--strict` | exit 1 if there are warnings; `export` then writes nothing |
 
 `epp export LOG --solar-node-sizer OUT.json [--full-config] [--measured-at supply|battery]
 [--name NAME]` and `epp synth [--profile esp32-wifi|atmega-nrf24] -o OUT
@@ -437,7 +456,13 @@ src/embedded_power_profiler/
 
 Performance, measured on the author's Windows 11 laptop with Python 3.14 and numpy installed: the
 30-minute 50 Hz trace above (90,000 samples) analyses in under a second; a synthetic 24-hour log at
-50 Hz (4.32 million samples) took 27 s, nearly all of it in pure-Python code.
+50 Hz (4.32 million samples) took 27 s, nearly all of it in pure-Python code. A generated
+PPK2-style CSV of 3,000,000 rows (30 s at 100 kHz, 50 MB; 25 uA sleep, 80 mA for 300 ms every
+6 s) analyses in 10-14 s with a peak working set of 43 MB, and gives 4.02 mA mean / 96.57 mAh/day
+against 4.024 mA / 96.57 mAh/day by hand. Version 0.1.0 read the same file into memory row by
+row and ran the change-point search on all 3 million samples: it was stopped after 734 s at
+about 877 MB. On a 300,000-row cut of the file 0.1.0 took 147 s and 0.2.0 takes 1.2 s, with the
+same table (25 uA and 80 mA states, 192.5 mAh/day).
 
 ## Testing
 
@@ -470,7 +495,10 @@ available (CI installs them at pinned tags). CI runs on Ubuntu and Windows with 
 - One dominant base state is assumed; devices without one are analysed, but wakes and outliers
   mean less.
 - The export assumes every state runs all day; hour-of-day windows (`from`/`to`) are not inferred.
-- Mostly pure Python: about 27 s for a day at 50 Hz on the author's machine.
+- Mostly pure Python: about 27 s for a day at 50 Hz on the author's machine. High-rate CSVs
+  are averaged to 1 ms by default, so features shorter than about 2 ms need `--resample-ms`
+  (and then take longer).
+- Daily figures from less than 60 s of log get a `short-log` warning, not a refusal.
 - The synthetic data model edge averaging, noise and quantisation only; real instruments add
   artefacts (offset drift, range switching, missed conversions) that are not simulated.
 
@@ -478,7 +506,8 @@ available (CI installs them at pinned tags). CI runs on Ubuntu and Windows with 
 
 - Validate against a bench measurement with a reference instrument and publish the comparison.
 - Hour-of-day schedules in the export (day/night duty cycles).
-- Readers for common power-analyser exports (Otii, Nordic PPK2 CSV).
+- Readers for common power-analyser binary formats (Otii, Joulescope `.jls`); PPK2 and other
+  CSV exports already load through the generic CSV reader.
 - Per-wake breakdown export for firmware A/B comparisons.
 
 ## License
