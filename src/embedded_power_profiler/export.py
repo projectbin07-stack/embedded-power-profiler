@@ -33,7 +33,8 @@ from .analysis import Result
 
 SNS_VERSION = "0.1.2"
 
-# solar-node-sizer v0.1.2 defaultConfig() (unchanged since v0.1.1) (src/core/config.js), less the load, which is ours.
+# solar-node-sizer v0.1.2 defaultConfig() (src/core/config.js, unchanged since v0.1.1), less
+# the load, which is ours.
 SNS_DEFAULTS: dict[str, Any] = {
     "location": {
         "lat": 12.97,
